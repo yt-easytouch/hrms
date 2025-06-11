@@ -1,5 +1,4 @@
 import frappe
-from frappe.tests import IntegrationTestCase
 from frappe.utils import (
 	add_days,
 	add_months,
@@ -25,9 +24,16 @@ from hrms.hr.doctype.leave_policy_assignment.leave_policy_assignment import (
 from hrms.hr.utils import allocate_earned_leaves, round_earned_leaves
 from hrms.payroll.doctype.salary_slip.test_salary_slip import make_holiday_list
 from hrms.tests.test_utils import get_first_sunday
+from hrms.tests.utils import HRMSTestSuite
 
 
-class TestLeaveAllocation(IntegrationTestCase):
+class TestLeaveAllocation(HRMSTestSuite):
+	@classmethod
+	def setUpClass(cls):
+		super().setUpClass()
+		cls.make_employees()
+		cls.make_leave_types()
+
 	def setUp(self):
 		for doctype in [
 			"Leave Period",
@@ -137,8 +143,14 @@ class TestLeaveAllocation(IntegrationTestCase):
 
 		# assignment created on the last day of the current month
 		frappe.flags.current_date = get_last_day(getdate())
-
-		leave_policy_assignments = make_policy_assignment(self.employee, assignment_based_on="Joining Date")
+		"""set end date while making assignment based on Joining date because while start date is fetched from
+		employee master, make_policy_assignment ends up taking current date as end date if not specified which
+		causes the date of assignment to be later than the end date of leave period"""
+		start_date = self.employee.date_of_joining
+		end_date = get_last_day(add_months(self.employee.date_of_joining, 12))
+		leave_policy_assignments = make_policy_assignment(
+			self.employee, assignment_based_on="Joining Date", start_date=start_date, end_date=end_date
+		)
 		leaves_allocated = get_allocated_leaves(leave_policy_assignments[0])
 		effective_from = frappe.db.get_value(
 			"Leave Policy Assignment", leave_policy_assignments[0], "effective_from"
@@ -174,7 +186,10 @@ class TestLeaveAllocation(IntegrationTestCase):
 		frappe.flags.current_date = get_first_day(getdate())
 
 		leave_policy_assignments = make_policy_assignment(
-			self.employee, allocate_on_day="Date of Joining", assignment_based_on="Joining Date"
+			self.employee,
+			allocate_on_day="Date of Joining",
+			assignment_based_on="Joining Date",
+			end_date=get_last_day(add_months(self.employee.date_of_joining, 12)),
 		)
 		leaves_allocated = get_allocated_leaves(leave_policy_assignments[0])
 		effective_from = frappe.db.get_value(
@@ -581,6 +596,8 @@ def make_policy_assignment(
 		"leave_policy": leave_policy.name,
 		"leave_period": leave_period.name,
 		"carry_forward": carry_forward,
+		"effective_from": start_date,
+		"effective_to": end_date,
 	}
 
 	leave_policy_assignments = create_assignment_for_multiple_employees([employee.name], frappe._dict(data))
