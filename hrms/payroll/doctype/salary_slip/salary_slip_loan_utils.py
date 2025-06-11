@@ -1,7 +1,7 @@
 # Copyright (c) 2023, Frappe Technologies Pvt. Ltd. and Contributors
 # License: GNU General Public License v3. See license.txt
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import frappe
 from frappe import _
@@ -31,11 +31,9 @@ def set_loan_repayment(doc: "SalarySlip"):
 
 	if not doc.get("loans", []):
 		loan_details = _get_loan_details(doc)
-		if loan_details:
-			process_loan_interest_accruals(loan_details, doc.end_date)
 
 		for loan in loan_details:
-			amounts = calculate_amounts(loan.name, doc.end_date, "Regular Payment")
+			amounts = calculate_amounts(loan.name, doc.end_date, "Normal Repayment")
 
 			if amounts["interest_amount"] or amounts["payable_principal_amount"]:
 				doc.append(
@@ -53,7 +51,7 @@ def set_loan_repayment(doc: "SalarySlip"):
 		doc.set("loans", [])
 
 	for payment in doc.get("loans", []):
-		amounts = calculate_amounts(payment.loan, doc.end_date, "Regular Payment")
+		amounts = calculate_amounts(payment.loan, doc.end_date, "Normal Repayment")
 		total_amount = amounts["interest_amount"] + amounts["payable_principal_amount"]
 		if payment.total_payment > total_amount:
 			frappe.throw(
@@ -72,7 +70,7 @@ def set_loan_repayment(doc: "SalarySlip"):
 		doc.total_loan_repayment += payment.total_payment
 
 
-def _get_loan_details(doc: "SalarySlip") -> dict[str, str | bool]:
+def _get_loan_details(doc: "SalarySlip") -> dict[str, Any]:
 	loan_details = frappe.get_all(
 		"Loan",
 		fields=["name", "interest_income_account", "loan_account", "loan_product", "is_term_loan"],
@@ -87,16 +85,45 @@ def _get_loan_details(doc: "SalarySlip") -> dict[str, str | bool]:
 	return loan_details
 
 
-def process_loan_interest_accruals(loan_details: dict[str, str | bool], posting_date: str):
-	from lending.loan_management.doctype.process_loan_interest_accrual.process_loan_interest_accrual import (
-		process_loan_interest_accrual_for_term_loans,
-	)
+@if_lending_app_installed
+def process_loan_interest_accrual_and_demand(doc: "SalarySlip"):
+	loans = _get_loan_details(doc)
+	if not loans:
+		return
 
-	for loan in loan_details:
-		if loan.is_term_loan:
-			process_loan_interest_accrual_for_term_loans(
-				posting_date=posting_date, loan_product=loan.loan_product, loan=loan.name
-			)
+	is_version_15 = is_lending_version_15()
+	if is_version_15:
+		from lending.loan_management.doctype.process_loan_interest_accrual.process_loan_interest_accrual import (
+			process_loan_interest_accrual_for_term_loans,
+		)
+	else:
+		from lending.loan_management.doctype.process_loan_interest_accrual.process_loan_interest_accrual import (
+			process_loan_interest_accrual_for_loans,
+		)
+
+	for loan in loans:
+		if loan.get("is_term_loan"):
+			if is_version_15:
+				process_loan_interest_accrual_for_term_loans(
+					posting_date=doc.end_date, loan_product=loan.loan_product, loan=loan.name
+				)
+			else:
+				process_loan_interest_accrual_for_loans(doc.end_date, loan.loan_product, loan.name)
+				process_loan_demand(doc.end_date, loan.loan_product, loan.name)
+
+
+def process_loan_demand(posting_date, loan_product, loan):
+	loan_disbursement = frappe.db.get_value(
+		"Loan Disbursement",
+		{"against_loan": loan, "docstatus": 1},
+		"name",
+	)
+	process_loan_demand = frappe.new_doc("Process Loan Demand")
+	process_loan_demand.posting_date = posting_date
+	process_loan_demand.loan_product = loan_product
+	process_loan_demand.loan = loan
+	process_loan_demand.loan_disbursement = loan_disbursement
+	process_loan_demand.submit()
 
 
 @if_lending_app_installed
@@ -121,7 +148,7 @@ def make_loan_repayment_entry(doc: "SalarySlip"):
 			doc.company,
 			doc.posting_date,
 			loan.loan_product,
-			"Regular Payment",
+			"Normal Repayment",
 			loan.interest_amount,
 			loan.principal_amount,
 			loan.total_payment,
@@ -155,3 +182,12 @@ def get_payroll_payable_account(company, payroll_entry):
 		payroll_payable_account = frappe.db.get_value("Company", company, "default_payroll_payable_account")
 
 	return payroll_payable_account
+
+
+def is_lending_version_15():
+	lending_version = frappe.db.get_value(
+		"Installed Application",
+		{"parent": "Installed Applications", "app_name": "lending"},
+		"git_branch",
+	)
+	return lending_version == "version-15"
