@@ -495,22 +495,19 @@ class SalarySlip(TransactionBase):
 
 			consider_unmarked_attendance_as = payroll_settings.consider_unmarked_attendance_as or "Present"
 
-			if (
-				payroll_settings.payroll_based_on == "Attendance"
-				and consider_unmarked_attendance_as == "Absent"
-			):
-				unmarked_days = self.get_unmarked_days(
-					payroll_settings.include_holidays_in_total_working_days, holidays
-				)
+			if payroll_settings.payroll_based_on == "Attendance":
+				if consider_unmarked_attendance_as == "Absent":
+					unmarked_days = self.get_unmarked_days(
+						payroll_settings.include_holidays_in_total_working_days, holidays
+					)
+					self.absent_days += unmarked_days  # will be treated as absent
+					self.payment_days -= unmarked_days
 				half_absent_days = self.get_half_absent_days(
-					payroll_settings.include_holidays_in_total_working_days,
 					consider_marked_attendance_on_holidays,
 					holidays,
 				)
-				self.absent_days += (
-					unmarked_days + half_absent_days * daily_wages_fraction_for_half_day
-				)  # will be treated as absent
-				self.payment_days -= unmarked_days + half_absent_days * daily_wages_fraction_for_half_day
+				self.absent_days += half_absent_days * daily_wages_fraction_for_half_day
+				self.payment_days -= half_absent_days * daily_wages_fraction_for_half_day
 		else:
 			self.payment_days = 0
 
@@ -529,9 +526,7 @@ class SalarySlip(TransactionBase):
 
 		return unmarked_days
 
-	def get_half_absent_days(
-		self, include_holidays_in_total_working_days, consider_marked_attendance_on_holidays, holidays
-	):
+	def get_half_absent_days(self, consider_marked_attendance_on_holidays, holidays):
 		"""Calculates the number of half absent days for an employee within a date range"""
 		Attendance = frappe.qb.DocType("Attendance")
 		query = (
@@ -545,11 +540,7 @@ class SalarySlip(TransactionBase):
 				& (Attendance.half_day_status == "Absent")
 			)
 		)
-		if (
-			(not include_holidays_in_total_working_days)
-			and (not consider_marked_attendance_on_holidays)
-			and holidays
-		):
+		if (not consider_marked_attendance_on_holidays) and holidays:
 			query = query.where(Attendance.attendance_date.notin(holidays))
 		return query.run()[0][0]
 
@@ -653,7 +644,7 @@ class SalarySlip(TransactionBase):
 
 		for d in working_days_list:
 			if self.relieving_date and d > self.relieving_date:
-				continue
+				break
 
 			leave = leaves.get(d)
 
@@ -674,7 +665,7 @@ class SalarySlip(TransactionBase):
 
 			if cint(leave.is_ppl):
 				equivalent_lwp_count *= (
-					fraction_of_daily_salary_per_leave if fraction_of_daily_salary_per_leave else 1
+					(1 - fraction_of_daily_salary_per_leave) if fraction_of_daily_salary_per_leave else 1
 				)
 
 			lwp += equivalent_lwp_count
@@ -1769,6 +1760,9 @@ class SalarySlip(TransactionBase):
 			to_date = getdate(self.payroll_period.end_date)
 
 		future_recurring_period = ((to_date.year - from_date.year) * 12) + (to_date.month - from_date.month)
+
+		if future_recurring_period > 0 and to_date.month == from_date.month:
+			future_recurring_period -= 1
 
 		return future_recurring_period
 
