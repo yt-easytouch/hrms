@@ -569,13 +569,13 @@ class LeaveApplication(Document, PWANotificationsMixin):
 	def validate_attendance(self):
 		attendance_dates = frappe.get_all(
 			"Attendance",
-			filters={
-				"employee": self.employee,
-				"attendance_date": ("between", [self.from_date, self.to_date]),
-				"status": ("in", ["Present", "Work From Home"]),
-				"docstatus": 1,
-				"half_day_status": ("!=", "Absent"),
-			},
+			filters=[
+				["employee", "=", self.employee],
+				["attendance_date", "between", [self.from_date, self.to_date]],
+				["status", "in", ["Present", "Work From Home"]],
+				["docstatus", "=", 1],
+				["half_day_status", "!=", "Absent"],
+			],
 			fields=["name", "attendance_date"],
 			order_by="attendance_date",
 		)
@@ -1079,7 +1079,7 @@ def get_leaves_pending_approval_for_period(
 			"from_date": ["between", (from_date, to_date)],
 			"to_date": ["between", (from_date, to_date)],
 		},
-		fields=["SUM(total_leave_days) as leaves"],
+		fields=[{"SUM": "total_leave_days", "as": "leaves"}],
 	)[0]
 	return leaves["leaves"] if leaves["leaves"] else 0.0
 
@@ -1142,7 +1142,8 @@ def get_manually_expired_leaves(
 		frappe.qb.from_(ledger)
 		.select(ledger.leaves)
 		.where(
-			(ledger.employee == employee)
+			(ledger.docstatus == 1)
+			& (ledger.employee == employee)
 			& (ledger.leave_type == leave_type)
 			& (ledger.from_date >= from_date)
 			& (ledger.to_date <= end_date)
