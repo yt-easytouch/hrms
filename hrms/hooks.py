@@ -6,14 +6,14 @@ app_email = "contact@frappe.io"
 app_license = "GNU General Public License (v3)"
 source_link = "http://github.com/frappe/hrms"
 app_logo_url = "/assets/hrms/images/frappe-hr-logo.svg"
-app_home = "/app/overview"
+app_home = "/desk/people"
 
 add_to_apps_screen = [
 	{
 		"name": "hrms",
 		"logo": "/assets/hrms/images/frappe-hr-logo.svg",
 		"title": "Frappe HR",
-		"route": "/app/overview",
+		"route": "/desk/people",
 		"has_permission": "hrms.hr.utils.check_app_permission",
 	}
 ]
@@ -372,3 +372,4 @@ company_data_to_be_ignored = [
 
 # List of apps whose translatable strings should be excluded from this app's translations.
 ignore_translatable_strings_from = ["frappe", "erpnext"]
+employee_holiday_list = ["hrms.utils.holiday_list.get_holiday_list_for_employee"]
