@@ -2,9 +2,12 @@
 # License: GNU General Public License v3. See license.txt
 
 
+from datetime import date
+
 import frappe
 from frappe import _
 from frappe.model.document import Document
+from frappe.query_builder.terms import ValueWrapper
 from frappe.utils import (
 	add_days,
 	cint,
@@ -34,6 +37,38 @@ class OverlappingShiftAttendanceError(frappe.ValidationError):
 
 
 class Attendance(Document):
+	# begin: auto-generated types
+	# This code is auto-generated. Do not modify anything in this block.
+
+	from typing import TYPE_CHECKING
+
+	if TYPE_CHECKING:
+		from frappe.types import DF
+
+		actual_overtime_duration: DF.Float
+		amended_from: DF.Link | None
+		attendance_date: DF.Date
+		attendance_request: DF.Link | None
+		company: DF.Link
+		department: DF.Link | None
+		early_exit: DF.Check
+		employee: DF.Link
+		employee_name: DF.Data | None
+		half_day_status: DF.Literal["", "Present", "Absent"]
+		in_time: DF.Datetime | None
+		late_entry: DF.Check
+		leave_application: DF.Link | None
+		leave_type: DF.Link | None
+		modify_half_day_status: DF.Check
+		naming_series: DF.Literal["HR-ATT-.YYYY.-"]
+		out_time: DF.Datetime | None
+		overtime_type: DF.Link | None
+		shift: DF.Link | None
+		standard_working_hours: DF.Float
+		status: DF.Literal["", "Present", "Absent", "On Leave", "Half Day", "Work From Home"]
+		working_hours: DF.Float
+	# end: auto-generated types
+
 	def before_insert(self):
 		if self.half_day_status == "":
 			self.half_day_status = None
@@ -249,10 +284,11 @@ class Attendance(Document):
 
 
 @frappe.whitelist()
-def get_events(start, end, filters=None):
+def get_events(start: date | str, end: date | str, filters: str | list | None = None) -> list[dict]:
 	employee = frappe.db.get_value("Employee", {"user_id": frappe.session.user})
 	if not employee:
 		return []
+
 	if isinstance(filters, str):
 		import json
 
@@ -270,7 +306,7 @@ def add_attendance(filters):
 		"Attendance",
 		fields=[
 			"name",
-			"'Attendance' as doctype",
+			ValueWrapper("Attendance").as_("doctype"),
 			"attendance_date",
 			"employee_name",
 			"status",
@@ -279,7 +315,7 @@ def add_attendance(filters):
 		filters=filters,
 	)
 	for record in attendance:
-		record["title"] = f"{record.employee_name} : {record.status}"
+		record["title"] = f"{record['employee_name']} : {record['status']}"
 	return attendance
 
 
@@ -338,7 +374,7 @@ def mark_attendance(
 
 
 @frappe.whitelist()
-def mark_bulk_attendance(data):
+def mark_bulk_attendance(data: str | dict):
 	import json
 
 	if isinstance(data, str):
@@ -348,11 +384,11 @@ def mark_bulk_attendance(data):
 		frappe.throw(_("Please select a date."))
 		return
 
-	for date in data.unmarked_days:
+	for attendance_date in data.unmarked_days:
 		doc_dict = {
 			"doctype": "Attendance",
 			"employee": data.employee,
-			"attendance_date": get_datetime(date),
+			"attendance_date": get_datetime(attendance_date),
 			"status": data.status,
 			"half_day_status": "Absent" if data.status == "Half Day" else None,
 			"shift": data.shift,
@@ -362,7 +398,9 @@ def mark_bulk_attendance(data):
 
 
 @frappe.whitelist()
-def get_unmarked_days(employee, from_date, to_date, exclude_holidays=0):
+def get_unmarked_days(
+	employee: str, from_date: str | date, to_date: str | date, exclude_holidays: str | int = 0
+) -> list:
 	joining_date, relieving_date = frappe.get_cached_value(
 		"Employee", employee, ["date_of_joining", "relieving_date"]
 	)
