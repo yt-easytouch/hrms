@@ -11,6 +11,7 @@ from frappe.query_builder.terms import ValueWrapper
 from frappe.utils import (
 	add_days,
 	cint,
+	create_batch,
 	cstr,
 	format_date,
 	get_datetime,
@@ -18,6 +19,7 @@ from frappe.utils import (
 	getdate,
 	nowdate,
 )
+from frappe.utils.background_jobs import get_job
 
 import hrms
 from hrms.hr.doctype.shift_assignment.shift_assignment import has_overlapping_timings
@@ -383,18 +385,47 @@ def mark_bulk_attendance(data: str | dict):
 	if not data.unmarked_days:
 		frappe.throw(_("Please select a date."))
 		return
+	if len(data.unmarked_days) > 10 or frappe.flags.test_bg_job:
+		job_id = f"process_bulk_attendance_for_employee_{data.employee}"
+		job = frappe.enqueue(
+			process_bulk_attendance_in_batches, data=data, job_id=job_id, timeout=600, deduplicate=True
+		)
+		if job:
+			message = _(
+				"Bulk attendance marking is queued with a background job. It may take a while. You can monitor the job status {0}"
+			).format(get_link_to_form("RQ Job", job.id, label="here"))
+		else:
+			message = _(
+				"Bulk attendance marking is already in progress for employee {0}. You can monitor the job status {1}"
+			).format(frappe.bold(data.employee), get_link_to_form("RQ Job", get_job(job_id).id, label="here"))
+		frappe.msgprint(message, allow_dangerous_html=True)
+	else:
+		process_bulk_attendance_in_batches(data)
+		frappe.msgprint(_("Attendance marked successfully."), alert=True)
 
-	for attendance_date in data.unmarked_days:
-		doc_dict = {
-			"doctype": "Attendance",
-			"employee": data.employee,
-			"attendance_date": get_datetime(attendance_date),
-			"status": data.status,
-			"half_day_status": "Absent" if data.status == "Half Day" else None,
-			"shift": data.shift,
-		}
-		attendance = frappe.get_doc(doc_dict).insert()
-		attendance.submit()
+
+def process_bulk_attendance_in_batches(data, chunk_size=20):
+	savepoint = "mark_bulk_attendance"
+	for days in create_batch(data.unmarked_days, chunk_size):
+		for attendance_date in days:
+			try:
+				frappe.db.savepoint(savepoint)
+				doc_dict = {
+					"doctype": "Attendance",
+					"employee": data.employee,
+					"attendance_date": getdate(attendance_date),
+					"status": data.status,
+					"half_day_status": "Absent" if data.status == "Half Day" else None,
+					"shift": data.shift,
+				}
+				attendance = frappe.get_doc(doc_dict).insert()
+				attendance.submit()
+			except (DuplicateAttendanceError, OverlappingShiftAttendanceError, Exception):
+				if not frappe.flags.in_test:
+					frappe.db.rollback(save_point=savepoint)
+				continue
+		if not frappe.flags.in_test:
+			frappe.db.commit()  # nosemgrep
 
 
 @frappe.whitelist()
@@ -437,3 +468,42 @@ def get_unmarked_days(
 		from_date = add_days(from_date, 1)
 
 	return unmarked_days
+
+
+@frappe.whitelist()
+def get_employee_shift(employee: str, for_date: str | date | None = None) -> str | None:
+	if not employee:
+		return None
+
+	if employee and not frappe.has_permission("Employee", "read", employee):
+		return None
+
+	if not for_date:
+		for_date = nowdate()
+
+	for_date = getdate(for_date)
+
+	if not frappe.has_permission("Shift Assignment", "read"):
+		return None
+
+	shifts = frappe.get_all(
+		"Shift Assignment",
+		filters={
+			"employee": employee,
+			"docstatus": 1,
+			"status": "Active",
+			"start_date": ("<=", for_date),
+		},
+		fields=["shift_type", "start_date"],
+		order_by="start_date desc",
+		limit=1,
+	)
+
+	if shifts:
+		return shifts[0].shift_type
+
+	default_shift = frappe.db.get_value("Employee", employee, "default_shift")
+	if default_shift:
+		return default_shift
+
+	return None

@@ -283,6 +283,7 @@ class LeaveAllocation(Document):
 			not self.total_leaves_allocated
 			and not frappe.db.get_value("Leave Type", self.leave_type, "is_earned_leave")
 			and not frappe.db.get_value("Leave Type", self.leave_type, "is_compensatory")
+			and not frappe.db.get_value("Leave Type", self.leave_type, "allow_negative")
 		):
 			frappe.throw(_("Total leaves allocated is mandatory for Leave Type {0}").format(self.leave_type))
 
@@ -435,7 +436,7 @@ class LeaveAllocation(Document):
 		adjustment_type: str,
 		leaves_to_adjust: str | float,
 		posting_date: str | datetime.date,
-		reason_for_adjustment: str,
+		reason_for_adjustment: str | None = None,
 	) -> None:
 		leave_adjustment = frappe.new_doc(
 			"Leave Adjustment",

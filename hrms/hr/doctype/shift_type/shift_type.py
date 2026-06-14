@@ -216,7 +216,8 @@ class ShiftType(Document):
 			)
 
 		# commit after processing checkin logs to avoid losing progress
-		frappe.db.commit()  # nosemgrep
+		if not frappe.in_test:
+			frappe.db.commit()  # nosemgrep
 
 		assigned_employees = self.get_assigned_employees(self.process_attendance_after, True)
 		# mark absent in batches & commit to avoid losing progress since this tries to process remaining attendance
@@ -226,7 +227,8 @@ class ShiftType(Document):
 				self.mark_absent_for_dates_with_no_attendance(employee)
 				self.mark_absent_for_half_day_dates(employee)
 
-			frappe.db.commit()  # nosemgrep
+			if not frappe.in_test:
+				frappe.db.commit()  # nosemgrep
 
 	def is_half_holiday(self, employee, attendance_date):
 		holiday_list = self.get_holiday_list(employee, attendance_date)
@@ -430,7 +432,12 @@ class ShiftType(Document):
 	def mark_absent_for_half_day_dates(self, employee):
 		half_day_attendances = frappe.get_all(
 			"Attendance",
-			filters={"employee": employee, "status": "Half Day", "modify_half_day_status": 1},
+			filters={
+				"employee": employee,
+				"status": "Half Day",
+				"modify_half_day_status": 1,
+				"attendance_date": ["<=", getdate(self.last_sync_of_checkin)],
+			},
 			fields=["name", "attendance_date"],
 		)
 		start_time = get_time(self.start_time)
