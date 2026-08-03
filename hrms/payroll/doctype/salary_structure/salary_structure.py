@@ -186,19 +186,13 @@ class SalaryStructure(Document):
 		self.db_update_all()
 
 	def get_employees(self, **kwargs):
-		conditions, values = [], []
+		Employee = frappe.qb.DocType("Employee")
+		query = frappe.qb.from_(Employee).select(Employee.name).where(Employee.status == "Active")
 		for field, value in kwargs.items():
 			if value:
-				conditions.append(f"{field}=%s")
-				values.append(value)
+				query = query.where(Employee[field] == value)
 
-		condition_str = " and " + " and ".join(conditions) if conditions else ""
-
-		# nosemgrep: frappe-semgrep-rules.rules.frappe-using-db-sql
-		employees = frappe.db.sql_list(
-			f"select name from tabEmployee where status='Active' {condition_str}",
-			tuple(values),
-		)
+		employees = query.run(pluck="name")
 
 		return employees
 
@@ -346,15 +340,19 @@ def create_salary_structure_assignment(
 
 
 def get_existing_assignments(employees, salary_structure, from_date):
-	# nosemgrep: frappe-semgrep-rules.rules.frappe-using-db-sql
-	salary_structures_assignments = frappe.db.sql_list(
-		f"""
-		SELECT DISTINCT employee FROM `tabSalary Structure Assignment`
-		WHERE salary_structure=%s AND employee IN ({", ".join(["%s"] * len(employees))})
-		AND from_date=%s AND company=%s AND docstatus=1
-		""",
-		[salary_structure.name, *employees, from_date, salary_structure.company],
-	)
+	ssa = frappe.qb.DocType("Salary Structure Assignment")
+	salary_structures_assignments = (
+		frappe.qb.from_(ssa)
+		.select(ssa.employee)
+		.distinct()
+		.where(
+			(ssa.salary_structure == salary_structure.name)
+			& (ssa.employee.isin(employees))
+			& (ssa.from_date == from_date)
+			& (ssa.company == salary_structure.company)
+			& (ssa.docstatus == 1)
+		)
+	).run(pluck="employee")
 	if salary_structures_assignments:
 		frappe.msgprint(
 			_(
@@ -366,6 +364,31 @@ def get_existing_assignments(employees, salary_structure, from_date):
 
 @frappe.whitelist()
 def make_salary_slip(
+	source_name: str,
+	target_doc: str | Document | None = None,
+	employee: str | None = None,
+	posting_date: str | datetime.date | None = None,
+	as_print: bool = False,
+	print_format: str | None = None,
+	for_preview: int = 0,
+	lwp_days_corrected: float | None = None,
+) -> str | Document:
+	if employee:
+		frappe.has_permission("Employee", "read", employee, throw=True)
+
+	return _make_salary_slip(
+		source_name,
+		target_doc=target_doc,
+		employee=employee,
+		posting_date=posting_date,
+		as_print=as_print,
+		print_format=print_format,
+		for_preview=for_preview,
+		lwp_days_corrected=lwp_days_corrected,
+	)
+
+
+def _make_salary_slip(
 	source_name: str,
 	target_doc: str | Document | None = None,
 	employee: str | None = None,
