@@ -1,11 +1,13 @@
 # Copyright (c) 2015, Frappe Technologies Pvt. Ltd. and Contributors
 # License: GNU General Public License v3. See license.txt
 
+from unittest.mock import patch
+
 from dateutil.relativedelta import relativedelta
 
 import frappe
 from frappe.query_builder.functions import Coalesce, Sum
-from frappe.utils import add_days, add_months, cstr, date_diff, flt
+from frappe.utils import add_days, add_months, cstr, date_diff, flt, get_first_day, get_last_day
 
 import erpnext
 from erpnext.accounts.utils import get_fiscal_year, getdate, nowdate
@@ -18,6 +20,7 @@ from hrms.payroll.doctype.payroll_entry.payroll_entry import (
 	PayrollEntry,
 	get_end_date,
 	get_start_end_dates,
+	set_match_conditions,
 )
 from hrms.payroll.doctype.salary_component.test_salary_component import create_salary_component
 from hrms.payroll.doctype.salary_slip.salary_slip_loan_utils import if_lending_app_installed
@@ -902,6 +905,12 @@ class TestPayrollEntry(HRMSTestSuite):
 		frappe.db.delete("Loan")
 		applicant, branch, currency, payroll_payable_account = setup_lending()
 
+		today = getdate()
+		payroll_start_date = get_first_day(today)
+		payroll_end_date = get_last_day(today)
+		loan_posting_date = get_first_day(add_months(today, -1))
+		repayment_start_date = add_days(payroll_start_date, 4)
+
 		loan = create_loan(
 			applicant,
 			"Car Loan",
@@ -909,8 +918,8 @@ class TestPayrollEntry(HRMSTestSuite):
 			"Repay Over Number of Periods",
 			20,
 			applicant_type="Employee",
-			posting_date="2026-06-02",
-			repayment_start_date="2026-07-05",
+			posting_date=loan_posting_date,
+			repayment_start_date=repayment_start_date,
 		)
 		loan.repay_from_salary = 1
 		loan.submit()
@@ -918,15 +927,14 @@ class TestPayrollEntry(HRMSTestSuite):
 		make_loan_disbursement_entry(
 			loan.name,
 			loan.loan_amount,
-			disbursement_date="2026-06-02",
-			repayment_start_date="2026-07-05",
+			disbursement_date=loan_posting_date,
+			repayment_start_date=repayment_start_date,
 		)
 
-		# July 2026 payroll — end_date 2026-07-31 covers the 2026-07-05 demand
 		payroll_entry = make_payroll_entry(
 			company="_Test Company",
-			start_date="2026-07-01",
-			end_date="2026-07-31",
+			start_date=payroll_start_date,
+			end_date=payroll_end_date,
 			payable_account=payroll_payable_account,
 			currency=currency,
 			branch=branch,
@@ -945,7 +953,7 @@ class TestPayrollEntry(HRMSTestSuite):
 			"Loan Repayment", loan_repayment_name, ["value_date", "interest_payable"]
 		)
 
-		self.assertEqual(getdate(lr_value_date), getdate("2026-07-31"))
+		self.assertEqual(getdate(lr_value_date), payroll_end_date)
 		self.assertGreater(flt(lr_interest_payable), 0)
 
 	@HRMSTestSuite.change_settings(
@@ -1179,6 +1187,22 @@ class TestPayrollEntry(HRMSTestSuite):
 		payroll_entry.discard()
 		payroll_entry.reload()
 		self.assertEqual(payroll_entry.status, "Cancelled")
+
+	def test_set_match_conditions_maps_permission_doctype_to_employee_field(self):
+		employee = frappe.qb.DocType("Employee")
+		query = frappe.qb.from_(employee).select(employee.name)
+
+		with patch(
+			"hrms.payroll.doctype.payroll_entry.payroll_entry.get_match_cond",
+			return_value=[{"Employee Grade": ["A"], "Unknown Doctype": ["Ignored"]}],
+		):
+			query = set_match_conditions(query, employee)
+
+		query_sql = query.get_sql()
+		self.assertIn("grade", query_sql)
+		self.assertIn("'A'", query_sql)
+		self.assertNotIn("Employee Grade", query_sql)
+		self.assertNotIn("Unknown Doctype", query_sql)
 
 
 def get_payroll_entry(**args):

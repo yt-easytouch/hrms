@@ -43,6 +43,7 @@ from hrms.payroll.doctype.salary_slip.salary_slip import (
 	TAX_COMPONENTS_BY_COMPANY,
 	SalarySlip,
 	_safe_eval,
+	generate_password_for_pdf,
 	make_salary_slip_from_timesheet,
 )
 from hrms.payroll.doctype.salary_structure.salary_structure import make_salary_slip
@@ -921,6 +922,19 @@ class TestSalarySlip(HRMSTestSuite):
 		ss.submit()
 
 		self.assertIsNotNone(get_email_by_subject("Test Salary Slip Email Template"))
+
+	@HRMSTestSuite.change_settings("System Settings", {"date_format": "dd-mm-yyyy"})
+	def test_pdf_password_uses_system_date_format(self):
+		emp_id = make_employee("test_pdf_password@salary.com", company="_Test Company")
+
+		# the format is cached per request, reset it so that the changed setting is picked up
+		frappe.local.user_date_format = None
+		self.addCleanup(setattr, frappe.local, "user_date_format", None)
+
+		self.assertEqual(generate_password_for_pdf("{date_of_birth}", emp_id), "08-05-1990")
+		# the value is still a date, so attribute access and format specs keep working
+		self.assertEqual(generate_password_for_pdf("SAL-{date_of_birth.year}", emp_id), "SAL-1990")
+		self.assertEqual(generate_password_for_pdf("{date_of_birth:%d%m%Y}", emp_id), "08051990")
 
 	def test_payroll_frequency(self):
 		fiscal_year = get_fiscal_year(nowdate(), company="_Test Company")[0]
@@ -1898,6 +1912,37 @@ class TestSalarySlip(HRMSTestSuite):
 				# LTA = 40000 - 21000 = 19000
 
 				self.assertEqual(earning.default_amount, 19000)
+
+	def test_ctc_in_statistical_component_formula(self):
+		from hrms.payroll.doctype.salary_structure.test_salary_structure import (
+			create_salary_structure_assignment,
+		)
+
+		emp = make_employee(
+			"test_ctc_statistical_component@salary.com",
+			company="_Test Company",
+			ctc=15000,
+		)
+
+		salary_structure_doc = make_salary_structure_for_statistical_component(
+			"_Test Company", sc_formula="ctc"
+		)
+
+		create_salary_structure_assignment(
+			employee=emp,
+			salary_structure=salary_structure_doc.name,
+			company="_Test Company",
+			currency="INR",
+			base=40000,
+		)
+
+		salary_slip = make_salary_slip(salary_structure_doc.name, employee=emp, posting_date=nowdate())
+
+		for earning in salary_slip.earnings:
+			if earning.salary_component == "Leave Travel Allowance":
+				# SC (statistical) = ctc = 15000
+				# LTA = base - SC = 40000 - 15000 = 25000
+				self.assertEqual(earning.amount, 25000)
 
 	def test_variable_tax_component(self):
 		from hrms.payroll.doctype.salary_structure.test_salary_structure import make_salary_structure
@@ -3041,7 +3086,7 @@ def create_additional_salary_for_income_tax(employee, payroll_period, company):
 	add_sal.submit()
 
 
-def make_salary_structure_for_statistical_component(company):
+def make_salary_structure_for_statistical_component(company, sc_formula="base - BSC - HRAC"):
 	earnings = [
 		{
 			"salary_component": "Basic Component",
@@ -3055,7 +3100,7 @@ def make_salary_structure_for_statistical_component(company):
 			"salary_component": "Statistical Component",
 			"abbr": "SC",
 			"type": "Earning",
-			"formula": "base - BSC - HRAC",
+			"formula": sc_formula,
 			"statistical_component": 1,
 			"amount_based_on_formula": 1,
 			"depends_on_payment_days": 0,
@@ -3252,3 +3297,139 @@ def clear_cache():
 		TAX_COMPONENTS_BY_COMPANY,
 	]:
 		frappe.cache().delete_value(key)
+
+
+class TestSalarySlipEmployerContributions(HRMSTestSuite):
+	COMPONENTS = (
+		("Test Slip Employer PF", "TSEPF", {"amount": 6000}, 1),
+		(
+			"Test Slip Employer NPS",
+			"TSENPS",
+			{"amount_based_on_formula": 1, "formula": "BS * 0.12"},
+			0,
+		),
+	)
+
+	def setUp(self):
+		make_payroll_period(company="_Test Company")
+		frappe.db.set_single_value("Payroll Settings", "email_salary_slip_to_employee", 0)
+		frappe.flags.pop("via_payroll_entry", None)
+
+		for component, abbr, _details, depends_on_payment_days in self.COMPONENTS:
+			if frappe.db.exists("Salary Component", component):
+				frappe.delete_doc("Salary Component", component, force=True)
+			frappe.get_doc(
+				{
+					"doctype": "Salary Component",
+					"salary_component": component,
+					"salary_component_abbr": abbr,
+					"type": "Employer Contribution",
+					"depends_on_payment_days": depends_on_payment_days,
+				}
+			).insert()
+
+	def make_structure(self, name, employee, with_contributions=True):
+		from hrms.payroll.doctype.salary_structure.test_salary_structure import make_salary_structure
+
+		other_details = None
+		if with_contributions:
+			other_details = {
+				"employer_contributions": [
+					{"salary_component": component, "abbr": abbr, **details}
+					for component, abbr, details, _dopd in self.COMPONENTS
+				]
+			}
+
+		return make_salary_structure(
+			name,
+			"Monthly",
+			employee=employee,
+			company="_Test Company",
+			currency="INR",
+			other_details=other_details,
+		)
+
+	def make_slip(self, name, email, with_contributions=True):
+		employee = make_employee(email, company="_Test Company")
+		structure = self.make_structure(name, employee, with_contributions)
+		return make_salary_slip(structure.name, employee=employee)
+
+	def test_employer_contributions_populated_on_slip(self):
+		slip = self.make_slip("Salary Structure Employer Contribution", "ec_populated@salary.com")
+
+		rows = {d.salary_component: d for d in slip.employer_contributions}
+		self.assertEqual(len(rows), 2)
+		self.assertEqual(rows["Test Slip Employer PF"].amount, 6000)
+		self.assertEqual(rows["Test Slip Employer PF"].abbr, "TSEPF")
+
+		basic = next(d.amount for d in slip.earnings if d.salary_component == "Basic Salary")
+		self.assertEqual(rows["Test Slip Employer NPS"].amount, flt(basic * 0.12, 2))
+
+	def test_employer_contributions_excluded_from_totals(self):
+		with_ec = self.make_slip("Salary Structure With EC", "ec_totals_with@salary.com")
+		without_ec = self.make_slip(
+			"Salary Structure Without EC", "ec_totals_without@salary.com", with_contributions=False
+		)
+
+		self.assertTrue(with_ec.employer_contributions)
+		self.assertFalse(without_ec.employer_contributions)
+
+		for field in ("gross_pay", "total_deduction", "net_pay", "rounded_total"):
+			self.assertEqual(
+				flt(with_ec.get(field), 2),
+				flt(without_ec.get(field), 2),
+				msg=f"{field} changed because of employer contributions",
+			)
+
+	def test_employer_contribution_not_in_taxable_ctc(self):
+		with_ec = self.make_slip("Salary Structure EC Tax", "ec_tax_with@salary.com")
+		without_ec = self.make_slip(
+			"Salary Structure EC Tax Control", "ec_tax_without@salary.com", with_contributions=False
+		)
+
+		self.assertEqual(flt(with_ec.ctc, 2), flt(without_ec.ctc, 2))
+		self.assertEqual(flt(with_ec.annual_taxable_amount, 2), flt(without_ec.annual_taxable_amount, 2))
+
+	def test_no_additional_salary_leaks_into_employer_contributions(self):
+		employee = make_employee("ec_additional_salary@salary.com", company="_Test Company")
+		structure = self.make_structure("Salary Structure EC Additional", employee)
+
+		additional_salary = frappe.get_doc(
+			{
+				"doctype": "Additional Salary",
+				"employee": employee,
+				"company": "_Test Company",
+				"salary_component": "Professional Tax",
+				"payroll_date": nowdate(),
+				"amount": 1000,
+				"type": "Deduction",
+				"currency": "INR",
+				"overwrite_salary_structure_amount": 1,
+			}
+		).submit()
+
+		slip = make_salary_slip(structure.name, employee=employee)
+
+		self.assertNotIn("Professional Tax", [d.salary_component for d in slip.employer_contributions])
+		self.assertIn("Professional Tax", [d.salary_component for d in slip.deductions])
+		self.assertEqual(len(slip.employer_contributions), 2)
+
+		additional_salary.cancel()
+
+	def test_employer_contributions_not_printed(self):
+		"""Employer cost stays on the record, not on the employee's payslip."""
+		slip = self.make_slip("Salary Structure EC Print", "ec_print@salary.com")
+		slip.insert()
+		self.assertEqual(len(slip.employer_contributions), 2)
+
+		html = frappe.get_print("Salary Slip", slip.name, print_format="Salary Slip Standard")
+		self.assertNotIn('data-fieldname="employer_contributions"', html)
+		self.assertNotIn("Test Slip Employer PF", html)
+		self.assertNotIn("Test Slip Employer NPS", html)
+
+	def test_employer_contributions_reset_on_reload(self):
+		slip = self.make_slip("Salary Structure EC Reload", "ec_reload@salary.com")
+		self.assertEqual(len(slip.employer_contributions), 2)
+
+		slip.get_emp_and_working_day_details()
+		self.assertEqual(len(slip.employer_contributions), 2)
